@@ -80,21 +80,15 @@ function parseDateTime(dateStr, timeStr) {
   const dRaw = (dateStr ?? "").trim();
   const tRaw = (timeStr ?? "").trim();
 
-  // Extract digits only
   const dDigits = dRaw.replace(/\D/g, "");
   const tDigits = tRaw.replace(/\D/g, "");
 
-  // --- Date parsing ---
-  // Accept:
-  //  - YYYYMMDD (8 digits)
-  //  - DDMMYYYY (8 digits)
-  //  - D/M/YYYY etc -> still becomes 7/8 digits; we handle 8 only reliably
   if (dDigits.length !== 8) return null;
 
   let year, month, day;
 
-  // If starts with 4-digit year => YYYYMMDD
-  if (/^(19|20)\d{2}/.test(dDigits)) {
+  // If original string starts with 4-digit year (YYYY-...)
+  if (/^\s*\d{4}\D/.test(dRaw)) {
     year = Number(dDigits.slice(0, 4));
     month = Number(dDigits.slice(4, 6));
     day = Number(dDigits.slice(6, 8));
@@ -105,17 +99,15 @@ function parseDateTime(dateStr, timeStr) {
     year = Number(dDigits.slice(4, 8));
   }
 
-  // --- Time parsing ---
-  // Accept HHmm or Hmm (e.g. 930 => 09:30)
+  if (month < 1 || month > 12) return null;
+  if (day < 1 || day > 31) return null;
+
   if (tDigits.length < 3 || tDigits.length > 4) return null;
 
   const tPad = tDigits.padStart(4, "0");
   const hour = Number(tPad.slice(0, 2));
   const minute = Number(tPad.slice(2, 4));
 
-  // Validate ranges quickly
-  if (month < 1 || month > 12) return null;
-  if (day < 1 || day > 31) return null;
   if (hour < 0 || hour > 23) return null;
   if (minute < 0 || minute > 59) return null;
 
@@ -126,7 +118,6 @@ function parseDateTime(dateStr, timeStr) {
 
   return dt.isValid ? dt : null;
 }
-
 
 function isValidUrl(s) {
   if (!s) return true; // empty allowed
@@ -432,5 +423,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
 });
 
 client.login(TOKEN);
+
 
 

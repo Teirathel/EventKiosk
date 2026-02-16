@@ -63,13 +63,60 @@ const IDS = {
 const DEFAULT_DURATION_MINUTES = 120; // Discord requires end time for External events
 
 // ---------- Helpers ----------
+function normalizeInput(s) {
+  if (!s) return "";
+  return s
+    .trim()
+    // replace various dash characters with normal hyphen
+    .replace(/[\u2012\u2013\u2014\u2015\u2212]/g, "-")
+    // replace non-breaking spaces with normal space
+    .replace(/\u00A0/g, " ")
+    // remove zero-width characters
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .trim();
+}
+
 function parseDateTime(dateStr, timeStr) {
-  // Expect dateStr: YYYY-MM-DD, timeStr: HH:mm (24h)
-  const dt = DateTime.fromFormat(`${dateStr} ${timeStr}`, "yyyy-MM-dd HH:mm", {
-    zone: TIMEZONE,
-    setZone: true,
-  });
-  return dt.isValid ? dt : null;
+  const d = normalizeInput(dateStr);
+  const t = normalizeInput(timeStr);
+
+  // Acceptable date formats:
+  // 1) YYYY-MM-DD
+  // 2) DD.MM.YYYY
+  // 3) DD/MM/YYYY
+  // Also tolerate single-digit day/month (e.g. 2.3.2026)
+  const dateFormats = ["yyyy-MM-dd", "d.M.yyyy", "d/M/yyyy"];
+
+  // Acceptable time formats:
+  // 1) HH:mm
+  // 2) H:mm
+  // 3) HH.mm
+  // 4) 19h30
+  // 5) 1930
+  let t2 = t
+    .toLowerCase()
+    .replace("h", ":")
+    .replace(".", ":");
+
+  // If time is like "1930" => "19:30"
+  if (/^\d{3,4}$/.test(t2)) {
+    const padded = t2.padStart(4, "0");
+    t2 = `${padded.slice(0, 2)}:${padded.slice(2)}`;
+  }
+
+  const timeFormats = ["HH:mm", "H:mm"];
+
+  for (const df of dateFormats) {
+    for (const tf of timeFormats) {
+      const dt = DateTime.fromFormat(`${d} ${t2}`, `${df} ${tf}`, {
+        zone: TIMEZONE,
+        setZone: true,
+      });
+      if (dt.isValid) return dt;
+    }
+  }
+
+  return null;
 }
 
 function isValidUrl(s) {
@@ -277,7 +324,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return interaction.reply({
           flags: 64,
           content:
-            "❌ I couldn't read your date/time.\nUse:\n• Date: `YYYY-MM-DD` (e.g. `2026-02-20`)\n• Time: `HH:mm` 24h (e.g. `19:30`)",
+  "❌ I couldn't read your date/time.\nUse one of these:\n" +
+  "• Date: `YYYY-MM-DD` (2026-02-20) or `DD.MM.YYYY` (20.02.2026)\n" +
+  "• Time: `HH:mm` (19:30) or `19h30`",
+
         });
       }
 
@@ -373,3 +423,4 @@ client.on(Events.InteractionCreate, async (interaction) => {
 });
 
 client.login(TOKEN);
+

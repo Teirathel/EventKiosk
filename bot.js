@@ -76,10 +76,27 @@ function normalizeInput(s) {
     .trim();
 }
 
+function getSafeZone() {
+  // Some environments can report a zone as invalid. Fallback to UTC.
+  const test = DateTime.now().setZone(TIMEZONE);
+  return test.isValid ? TIMEZONE : "UTC";
+}
+
 function parseDateTime(dateStr, timeStr) {
+  const zone = getSafeZone();
+
   const dRaw = (dateStr ?? "").trim();
   const tRaw = (timeStr ?? "").trim();
 
+  // 1) ISO-first (handles exactly: YYYY-MM-DD + HH:mm)
+  // Example: 2026-02-20T19:00
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dRaw) && /^\d{2}:\d{2}$/.test(tRaw)) {
+    const iso = `${dRaw}T${tRaw}`;
+    const dtIso = DateTime.fromISO(iso, { zone, setZone: true });
+    if (dtIso.isValid) return dtIso;
+  }
+
+  // 2) Digits-based fallback (handles 20.02.2026, 19h00, 1900, etc.)
   const dDigits = dRaw.replace(/\D/g, "");
   const tDigits = tRaw.replace(/\D/g, "");
 
@@ -87,13 +104,13 @@ function parseDateTime(dateStr, timeStr) {
 
   let year, month, day;
 
-  // If original string starts with 4-digit year (YYYY-...)
+  // Decide date layout using the ORIGINAL string:
+  // - If it starts with 4 digits and then a non-digit => YYYY...
   if (/^\s*\d{4}\D/.test(dRaw)) {
     year = Number(dDigits.slice(0, 4));
     month = Number(dDigits.slice(4, 6));
     day = Number(dDigits.slice(6, 8));
   } else {
-    // Otherwise treat as DDMMYYYY
     day = Number(dDigits.slice(0, 2));
     month = Number(dDigits.slice(2, 4));
     year = Number(dDigits.slice(4, 8));
@@ -103,7 +120,6 @@ function parseDateTime(dateStr, timeStr) {
   if (day < 1 || day > 31) return null;
 
   if (tDigits.length < 3 || tDigits.length > 4) return null;
-
   const tPad = tDigits.padStart(4, "0");
   const hour = Number(tPad.slice(0, 2));
   const minute = Number(tPad.slice(2, 4));
@@ -111,11 +127,7 @@ function parseDateTime(dateStr, timeStr) {
   if (hour < 0 || hour > 23) return null;
   if (minute < 0 || minute > 59) return null;
 
-  const dt = DateTime.fromObject(
-    { year, month, day, hour, minute },
-    { zone: TIMEZONE }
-  );
-
+  const dt = DateTime.fromObject({ year, month, day, hour, minute }, { zone });
   return dt.isValid ? dt : null;
 }
 
@@ -423,6 +435,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 });
 
 client.login(TOKEN);
+
 
 
 

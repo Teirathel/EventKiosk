@@ -77,47 +77,56 @@ function normalizeInput(s) {
 }
 
 function parseDateTime(dateStr, timeStr) {
-  const d = normalizeInput(dateStr);
-  const t = normalizeInput(timeStr);
+  const dRaw = (dateStr ?? "").trim();
+  const tRaw = (timeStr ?? "").trim();
 
-  // Acceptable date formats:
-  // 1) YYYY-MM-DD
-  // 2) DD.MM.YYYY
-  // 3) DD/MM/YYYY
-  // Also tolerate single-digit day/month (e.g. 2.3.2026)
-  const dateFormats = ["yyyy-MM-dd", "d.M.yyyy", "d/M/yyyy"];
+  // Extract digits only
+  const dDigits = dRaw.replace(/\D/g, "");
+  const tDigits = tRaw.replace(/\D/g, "");
 
-  // Acceptable time formats:
-  // 1) HH:mm
-  // 2) H:mm
-  // 3) HH.mm
-  // 4) 19h30
-  // 5) 1930
-  let t2 = t
-    .toLowerCase()
-    .replace("h", ":")
-    .replace(".", ":");
+  // --- Date parsing ---
+  // Accept:
+  //  - YYYYMMDD (8 digits)
+  //  - DDMMYYYY (8 digits)
+  //  - D/M/YYYY etc -> still becomes 7/8 digits; we handle 8 only reliably
+  if (dDigits.length !== 8) return null;
 
-  // If time is like "1930" => "19:30"
-  if (/^\d{3,4}$/.test(t2)) {
-    const padded = t2.padStart(4, "0");
-    t2 = `${padded.slice(0, 2)}:${padded.slice(2)}`;
+  let year, month, day;
+
+  // If starts with 4-digit year => YYYYMMDD
+  if (/^(19|20)\d{2}/.test(dDigits)) {
+    year = Number(dDigits.slice(0, 4));
+    month = Number(dDigits.slice(4, 6));
+    day = Number(dDigits.slice(6, 8));
+  } else {
+    // Otherwise treat as DDMMYYYY
+    day = Number(dDigits.slice(0, 2));
+    month = Number(dDigits.slice(2, 4));
+    year = Number(dDigits.slice(4, 8));
   }
 
-  const timeFormats = ["HH:mm", "H:mm"];
+  // --- Time parsing ---
+  // Accept HHmm or Hmm (e.g. 930 => 09:30)
+  if (tDigits.length < 3 || tDigits.length > 4) return null;
 
-  for (const df of dateFormats) {
-    for (const tf of timeFormats) {
-      const dt = DateTime.fromFormat(`${d} ${t2}`, `${df} ${tf}`, {
-        zone: TIMEZONE,
-        setZone: true,
-      });
-      if (dt.isValid) return dt;
-    }
-  }
+  const tPad = tDigits.padStart(4, "0");
+  const hour = Number(tPad.slice(0, 2));
+  const minute = Number(tPad.slice(2, 4));
 
-  return null;
+  // Validate ranges quickly
+  if (month < 1 || month > 12) return null;
+  if (day < 1 || day > 31) return null;
+  if (hour < 0 || hour > 23) return null;
+  if (minute < 0 || minute > 59) return null;
+
+  const dt = DateTime.fromObject(
+    { year, month, day, hour, minute },
+    { zone: TIMEZONE }
+  );
+
+  return dt.isValid ? dt : null;
 }
+
 
 function isValidUrl(s) {
   if (!s) return true; // empty allowed
@@ -324,10 +333,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return interaction.reply({
           flags: 64,
           content:
-  "❌ I couldn't read your date/time.\nUse one of these:\n" +
-  "• Date: `YYYY-MM-DD` (2026-02-20) or `DD.MM.YYYY` (20.02.2026)\n" +
-  "• Time: `HH:mm` (19:30) or `19h30`",
-
+            "❌ I couldn't read your date/time.\n\n" +
+            `Received date: \`${dateStr}\`\n` +
+            `Received time: \`${timeStr}\`\n\n` +
+            "Try:\n• Date: `2026-02-20` or `20.02.2026`\n• Time: `19:30` or `19h30` or `1930`",
         });
       }
 
@@ -423,4 +432,5 @@ client.on(Events.InteractionCreate, async (interaction) => {
 });
 
 client.login(TOKEN);
+
 

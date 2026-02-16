@@ -13,36 +13,50 @@
  */
 
 // --- register-commands.js ---
- import "dotenv/config";
-import { REST, Routes, SlashCommandBuilder, PermissionFlagsBits } from "discord.js";
+import "dotenv/config";
+import { REST, Routes, SlashCommandBuilder, PermissionFlagsBits, ChannelType } from "discord.js";
 
- const TOKEN = process.env.DISCORD_TOKEN;
- const CLIENT_ID = process.env.CLIENT_ID; // your application client id
- const GUILD_ID = process.env.GUILD_ID;
+const TOKEN = process.env.DISCORD_TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID;
 
- if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
-   console.error("Missing env vars: DISCORD_TOKEN, CLIENT_ID, GUILD_ID");
-   process.exit(1);
- }
+if (!TOKEN || !CLIENT_ID) {
+  console.error("Missing env vars: DISCORD_TOKEN, CLIENT_ID");
+  process.exit(1);
+}
 
- const commands = [
-   new SlashCommandBuilder()
-     .setName("setupkiosk")
-     .setDescription("Post the event creation kiosk message in the kiosk channel.")
-     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-     .toJSON(),
- ];
+const commands = [
+  new SlashCommandBuilder()
+    .setName("setupkiosk")
+    .setDescription("Configure this server and post the Event Kiosk button panel.")
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addChannelOption(o =>
+      o.setName("kiosk_channel")
+        .setDescription("Channel where the kiosk button panel will be posted")
+        .setRequired(true)
+        .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+    )
+    .addChannelOption(o =>
+      o.setName("announce_channel")
+        .setDescription("Channel where event announcements will be posted")
+        .setRequired(true)
+        .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+    )
+    .addRoleOption(o =>
+      o.setName("events_role")
+        .setDescription("Optional role to ping for new events")
+        .setRequired(false)
+    )
+    .toJSON(),
+];
 
- const rest = new REST({ version: "10" }).setToken(TOKEN);
+const rest = new REST({ version: "10" }).setToken(TOKEN);
 
- (async () => {
-   try {
-     console.log("Registering guild commands...");
-     await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
-       body: commands,
-     });
-     console.log("✅ Commands registered.");
-   } catch (e) {
-     console.error(e);
-   }
- })();
+(async () => {
+  try {
+    console.log("Registering global commands...");
+    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+    console.log("✅ Global commands registered.");
+  } catch (e) {
+    console.error(e);
+  }
+})();

@@ -165,31 +165,6 @@ function buildKioskMessage() {
   return { embeds: [embed], components: [row] };
 }
 
-function buildAnnouncementEmbed({ title, startDt, endDt, details, link, createdBy }) {
-  const startUnix = Math.floor(startDt.toSeconds());
-  const endUnix = Math.floor(endDt.toSeconds());
-
-  const embed = new EmbedBuilder()
-    .setTitle(title)
-    .addFields(
-      {
-        name: "When",
-        value: `<t:${startUnix}:F> → <t:${endUnix}:t>\n(<t:${startUnix}:R>)`,
-      },
-      { name: "Organizer", value: `${createdBy}`, inline: true }
-    )
-    .setFooter({ text: `Timezone: ${TIMEZONE}` });
-
-  if (details?.trim()) {
-    embed.addFields({ name: "Details", value: details.trim().slice(0, 1024) });
-  }
-  if (link?.trim()) {
-    embed.addFields({ name: "Link", value: link.trim().slice(0, 1024) });
-  }
-
-  return embed;
-}
-
 function isAllowedSetupChannel(ch) {
   // allow Text + Announcement channels as targets
   return (
@@ -395,21 +370,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
         });
       }
 
-      const embed = buildAnnouncementEmbed({
-        title,
-        startDt,
-        endDt,
-        details,
-        link,
-        createdBy: interaction.user.toString(),
-      });
-
       const ping = cfg.events_role_id ? `<@&${cfg.events_role_id}> ` : "";
-      const announcement = await announceChannel.send({
-        content: `${ping}📣 **New Event Created!**\n${createdEvent.url}`,
-        embeds: [embed],
-        allowedMentions: { roles: cfg.events_role_id ? [cfg.events_role_id] : [] },
-      });
+     const announcement = await announceChannel.send({
+  content: `${ping}${createdEvent.url}`,
+  allowedMentions: { roles: cfg.events_role_id ? [cfg.events_role_id] : [] },
+});
 
       return interaction.reply({
         flags: 64,
@@ -435,6 +400,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 });
 
 client.login(TOKEN);
+
 
 
 

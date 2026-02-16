@@ -4,6 +4,7 @@
   "type": "module",
   "main": "bot.js",
   "engines": { "node": "20.x" },
+  "better-sqlite3": "^11.0.0",
   "scripts": {
     "start": "node bot.js",
     "register": "node register-commands.js"

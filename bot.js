@@ -1,33 +1,20 @@
 /**
- * Discord "Event Kiosk" Bot (discord.js v14)
+ * Event Kiosk (Multi-Server) — bot.js
+ * discord.js v14 (ESM)
  *
- * Features:
- * - Posts a fixed kiosk message with a button ("Create Event")
- * - Button opens a Modal (popup) to collect: title, date, time, details, link (optional)
- * - On submit:
- *    1) Creates a Discord Scheduled Event (External)
- *    2) Posts an announcement embed in a chosen channel (optional role ping)
+ * What this does:
+ * - Admin runs /setupkiosk (with channel options) once per server
+ * - Bot stores that server config in SQLite (via ./db.js)
+ * - Users click a button -> modal popup -> Bot creates a Discord Scheduled Event + posts announcement
  *
- * Requirements:
- * - Node.js 18+
- * - discord.js v14
- *
- * ENV (.env):
+ * ENV required:
  *   DISCORD_TOKEN=...
- *   GUILD_ID=...
- *   KIOSK_CHANNEL_ID=...
- *   ANNOUNCE_CHANNEL_ID=...
- *   EVENTS_ROLE_ID=...   (optional; role to ping)
- *   TIMEZONE=Europe/Luxembourg (optional; default)
+ * Optional:
+ *   TIMEZONE=Europe/Luxembourg
  *
- * Bot permissions:
- * - Manage Events (for creating scheduled events)
- * - Send Messages + Embed Links (announce + kiosk channels)
- * - View Channels (kiosk + announce)
- *
- * Setup:
- *   npm i discord.js dotenv luxon
- *   node bot.js
+ * NOTE:
+ * - You MUST also create db.js (I reference it below)
+ * - You MUST register the /setupkiosk command as GLOBAL with channel options in register-commands.js
  */
 
 import "dotenv/config";
@@ -35,28 +22,26 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  ChannelType,
   Client,
   EmbedBuilder,
   Events,
   GatewayIntentBits,
+  GuildScheduledEventEntityType,
+  GuildScheduledEventPrivacyLevel,
   ModalBuilder,
   PermissionFlagsBits,
   TextInputBuilder,
   TextInputStyle,
 } from "discord.js";
 import { DateTime } from "luxon";
+import { getGuildConfig, upsertGuildConfig } from "./db.js";
 
 const TOKEN = process.env.DISCORD_TOKEN;
-const GUILD_ID = process.env.GUILD_ID;
-const KIOSK_CHANNEL_ID = process.env.KIOSK_CHANNEL_ID;
-const ANNOUNCE_CHANNEL_ID = process.env.ANNOUNCE_CHANNEL_ID;
-const EVENTS_ROLE_ID = process.env.EVENTS_ROLE_ID || null;
 const TIMEZONE = process.env.TIMEZONE || "Europe/Luxembourg";
 
-if (!TOKEN || !GUILD_ID || !KIOSK_CHANNEL_ID || !ANNOUNCE_CHANNEL_ID) {
-  console.error(
-    "Missing env vars. Required: DISCORD_TOKEN, GUILD_ID, KIOSK_CHANNEL_ID, ANNOUNCE_CHANNEL_ID"
-  );
+if (!TOKEN) {
+  console.error("Missing env var: DISCORD_TOKEN");
   process.exit(1);
 }
 
@@ -67,14 +52,15 @@ const client = new Client({
 const IDS = {
   kioskButton: "kiosk_create_event",
   modal: "kiosk_event_modal",
-
   // modal inputs
   title: "event_title",
-  date: "event_date", // YYYY-MM-DD
-  time: "event_time", // HH:mm
+  date: "event_date",
+  time: "event_time",
   details: "event_details",
   link: "event_link",
 };
+
+const DEFAULT_DURATION_MINUTES = 120; // Discord requires end time for External events
 
 // ---------- Helpers ----------
 function parseDateTime(dateStr, timeStr) {
@@ -120,21 +106,18 @@ function buildKioskMessage() {
   return { embeds: [embed], components: [row] };
 }
 
-function buildAnnouncementEmbed({ title, startDt, details, link, createdBy }) {
+function buildAnnouncementEmbed({ title, startDt, endDt, details, link, createdBy }) {
+  const startUnix = Math.floor(startDt.toSeconds());
+  const endUnix = Math.floor(endDt.toSeconds());
+
   const embed = new EmbedBuilder()
     .setTitle(title)
     .addFields(
       {
         name: "When",
-        value: `<t:${Math.floor(startDt.toSeconds())}:F>  (<t:${Math.floor(
-          startDt.toSeconds()
-        )}:R>)`,
+        value: `<t:${startUnix}:F> → <t:${endUnix}:t>\n(<t:${startUnix}:R>)`,
       },
-      {
-        name: "Organizer",
-        value: `${createdBy}`,
-        inline: true,
-      }
+      { name: "Organizer", value: `${createdBy}`, inline: true }
     )
     .setFooter({ text: `Timezone: ${TIMEZONE}` });
 
@@ -148,57 +131,75 @@ function buildAnnouncementEmbed({ title, startDt, details, link, createdBy }) {
   return embed;
 }
 
-// ---------- Slash command (simple, built-in) ----------
-// We’ll register ONE command via Discord UI-less approach: a "message command" isn't needed.
-// Instead, we implement a chat input command handler for /setupkiosk.
-// NOTE: You still need to register the command once (script included at bottom).
+function isAllowedSetupChannel(ch) {
+  // allow Text + Announcement channels as targets
+  return (
+    ch?.type === ChannelType.GuildText ||
+    ch?.type === ChannelType.GuildAnnouncement
+  );
+}
 
-const COMMANDS = {
-  setupkiosk: "setupkiosk",
-};
-
-client.once(Events.ClientReady, async (c) => {
+// ---------- Ready ----------
+client.once(Events.ClientReady, (c) => {
   console.log(`✅ Logged in as ${c.user.tag}`);
 });
 
 // ---------- Interactions ----------
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
-    // 1) /setupkiosk (admin-only)
+    // We only operate inside servers
+    if (!interaction.guildId) return;
+
+    // 1) /setupkiosk (admin-only) — saves per-server config + posts the kiosk message
     if (interaction.isChatInputCommand()) {
-      if (interaction.commandName === COMMANDS.setupkiosk) {
-        if (
-          !interaction.memberPermissions?.has(
-            PermissionFlagsBits.ManageGuild
-          )
-        ) {
+      if (interaction.commandName === "setupkiosk") {
+        if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
           return interaction.reply({
-            ephemeral: true,
+            flags: 64,
             content: "You need **Manage Server** to run this command.",
           });
         }
 
-        const kioskChannel = await client.channels.fetch(KIOSK_CHANNEL_ID);
-        if (!kioskChannel?.isTextBased()) {
+        const kioskChannel = interaction.options.getChannel("kiosk_channel", true);
+        const announceChannel = interaction.options.getChannel("announce_channel", true);
+        const role = interaction.options.getRole("events_role", false);
+
+        if (!isAllowedSetupChannel(kioskChannel) || !isAllowedSetupChannel(announceChannel)) {
           return interaction.reply({
-            ephemeral: true,
-            content:
-              "KIOSK_CHANNEL_ID is not a text channel I can post in.",
+            flags: 64,
+            content: "Please select valid **text/announcement channels** for kiosk + announcements.",
           });
         }
 
+        // Save config for this guild
+        upsertGuildConfig({
+          guildId: interaction.guildId,
+          kioskChannelId: kioskChannel.id,
+          announceChannelId: announceChannel.id,
+          eventsRoleId: role?.id ?? null,
+        });
+
+        // Post kiosk message
         const msg = await kioskChannel.send(buildKioskMessage());
 
         return interaction.reply({
-          ephemeral: true,
-          content: `✅ Kiosk message posted: ${msg.url}`,
+          flags: 64,
+          content: `✅ Configuration saved for this server.\n✅ Kiosk message posted: ${msg.url}`,
         });
       }
     }
 
-    // 2) Button click -> show modal
+    // 2) Button click -> show modal (requires server configured)
     if (interaction.isButton()) {
       if (interaction.customId !== IDS.kioskButton) return;
+
+      const cfg = getGuildConfig(interaction.guildId);
+      if (!cfg) {
+        return interaction.reply({
+          flags: 64,
+          content: "❌ This server is not configured yet. An admin must run `/setupkiosk` first.",
+        });
+      }
 
       const modal = new ModalBuilder()
         .setCustomId(IDS.modal)
@@ -252,118 +253,121 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return interaction.showModal(modal);
     }
 
-    // 3) Modal submit -> create event + announce
+    // 3) Modal submit -> create event + announce (uses per-server config)
     if (interaction.isModalSubmit()) {
       if (interaction.customId !== IDS.modal) return;
+
+      const cfg = getGuildConfig(interaction.guildId);
+      if (!cfg) {
+        return interaction.reply({
+          flags: 64,
+          content: "❌ This server is not configured yet. An admin must run `/setupkiosk` first.",
+        });
+      }
 
       const title = interaction.fields.getTextInputValue(IDS.title).trim();
       const dateStr = interaction.fields.getTextInputValue(IDS.date).trim();
       const timeStr = interaction.fields.getTextInputValue(IDS.time).trim();
-      const details =
-        interaction.fields.getTextInputValue(IDS.details)?.trim() || "";
-      const link =
-        interaction.fields.getTextInputValue(IDS.link)?.trim() || "";
+      const details = (interaction.fields.getTextInputValue(IDS.details) || "").trim();
+      const link = (interaction.fields.getTextInputValue(IDS.link) || "").trim();
 
       // Validate date/time
       const startDt = parseDateTime(dateStr, timeStr);
       if (!startDt) {
         return interaction.reply({
-          ephemeral: true,
+          flags: 64,
           content:
             "❌ I couldn't read your date/time.\nUse:\n• Date: `YYYY-MM-DD` (e.g. `2026-02-20`)\n• Time: `HH:mm` 24h (e.g. `19:30`)",
         });
       }
-      if (startDt < DateTime.now().setZone(TIMEZONE).plus({ minutes: 2 })) {
+
+      const now = DateTime.now().setZone(TIMEZONE);
+      if (startDt < now.plus({ minutes: 2 })) {
         return interaction.reply({
-          ephemeral: true,
-          content:
-            "❌ That start time is too soon / in the past. Please choose a future time (at least a few minutes ahead).",
+          flags: 64,
+          content: "❌ That start time is too soon / in the past. Please choose a future time.",
         });
       }
 
       // Validate link
       if (!isValidUrl(link)) {
         return interaction.reply({
-          ephemeral: true,
-          content:
-            "❌ Link must be a valid URL starting with `https://` (or leave it empty).",
+          flags: 64,
+          content: "❌ Link must be a valid URL starting with `https://` (or leave it empty).",
         });
       }
 
-      // Prepare fields for Discord event
-      const guild = await client.guilds.fetch(GUILD_ID);
+      // End time required for External events
+      const endDt = startDt.plus({ minutes: DEFAULT_DURATION_MINUTES });
 
-      // Discord scheduled events require a Date object (UTC inside)
-      const scheduledStartTime = startDt.toJSDate();
-
-      // For external events, Discord requires: entityType: External, and a location.
-      // We'll set "Online" unless link exists (then use link as location).
       const location = link ? link : "Online";
-
-      // Create the scheduled event
-      const endDt = startDt.plus({ hours: 2 });
+      const scheduledStartTime = startDt.toJSDate();
       const scheduledEndTime = endDt.toJSDate();
 
+      // Create scheduled event in THIS guild
+      const guild = interaction.guild; // correct guild automatically
       const createdEvent = await guild.scheduledEvents.create({
         name: title,
         scheduledStartTime,
-        scheduledEndTime,              // ✅ REQUIRED for External events
-        entityType: 3,                 // External
-        privacyLevel: 2,               // GuildOnly
-        description: [
-          details ? details : null,
-          link ? `Link: ${link}` : null,
-        ].filter(Boolean).join("\n").slice(0, 1000) || " ",
+        scheduledEndTime,
+        entityType: GuildScheduledEventEntityType.External,
+        privacyLevel: GuildScheduledEventPrivacyLevel.GuildOnly,
+        description:
+          [
+            details ? details : null,
+            link ? `Link: ${link}` : null,
+          ]
+            .filter(Boolean)
+            .join("\n")
+            .slice(0, 1000) || " ",
         entityMetadata: { location },
       });
 
-      // Announce in channel
-      const announceChannel = await client.channels.fetch(
-        ANNOUNCE_CHANNEL_ID
-      );
+      // Announce in configured channel
+      const announceChannel = await client.channels.fetch(cfg.announce_channel_id);
       if (!announceChannel?.isTextBased()) {
         return interaction.reply({
-          ephemeral: true,
+          flags: 64,
           content:
-            "⚠ Event created, but I couldn't post the announcement because ANNOUNCE_CHANNEL_ID is not a text channel.",
+            `⚠ Event created (${createdEvent.url}), but I couldn't post the announcement because the configured announcement channel is not accessible.`,
         });
       }
 
       const embed = buildAnnouncementEmbed({
         title,
         startDt,
+        endDt,
         details,
         link,
         createdBy: interaction.user.toString(),
       });
 
-      const ping = EVENTS_ROLE_ID ? `<@&${EVENTS_ROLE_ID}> ` : "";
+      const ping = cfg.events_role_id ? `<@&${cfg.events_role_id}> ` : "";
       const announcement = await announceChannel.send({
         content: `${ping}📣 **New Event Created!**\n${createdEvent.url}`,
         embeds: [embed],
-        allowedMentions: {
-          roles: EVENTS_ROLE_ID ? [EVENTS_ROLE_ID] : [],
-        },
+        allowedMentions: { roles: cfg.events_role_id ? [cfg.events_role_id] : [] },
       });
 
       return interaction.reply({
-        ephemeral: true,
-        content:
-          `✅ Event created: ${createdEvent.url}\n` +
-          `✅ Announcement posted: ${announcement.url}`,
+        flags: 64,
+        content: `✅ Event created: ${createdEvent.url}\n✅ Announcement posted: ${announcement.url}`,
       });
     }
   } catch (err) {
     console.error(err);
-    if (interaction?.isRepliable()) {
-      const alreadyReplied = interaction.deferred || interaction.replied;
-      const payload = {
-        ephemeral: true,
-        content:
-          "❌ Something went wrong. Please try again, or ask an admin to check the bot logs.",
-      };
-      if (alreadyReplied) return interaction.followUp(payload);
-      return interaction.reply(payload);
+    try {
+      if (interaction?.isRepliable()) {
+        const alreadyReplied = interaction.deferred || interaction.replied;
+        const payload = {
+          flags: 64,
+          content: "❌ Something went wrong. Please try again, or ask an admin to check the bot logs.",
+        };
+        if (alreadyReplied) return interaction.followUp(payload);
+        return interaction.reply(payload);
+      }
+    } catch (_) {
+      // ignore
     }
   }
 });
